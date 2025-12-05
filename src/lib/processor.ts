@@ -3,8 +3,15 @@ import { spawn } from "child_process";
 import { writeFile, unlink, mkdtemp } from "fs/promises";
 import { tmpdir } from "os";
 import { join } from "path";
-import { BlobServiceClient } from "@azure/storage-blob";
+import { BlobServiceClient, BlobClient } from "@azure/storage-blob";
 import { envParseString } from "@skyra/env-utilities";
+import { Worker, Job } from "bullmq";
+import { redisConnection } from "./mq.js";
+import type z from "zod";
+import type { newJobSchema } from "./types.js";
+
+// Type for job data based on the schema
+type JobData = z.infer<typeof newJobSchema>;
 
 function log(message: string) {
   console.log(`[PROCESSOR] ${new Date().toISOString()} - ${message}`);
@@ -228,6 +235,53 @@ async function getVideoDimensions(
       "-of",
       "json",
       videoPath,
+    ]);
+
+    let stdout = "";
+    let stderr = "";
+
+    ffprobe.stdout.on("data", (data) => {
+      stdout += data.toString();
+    });
+
+    ffprobe.stderr.on("data", (data) => {
+      stderr += data.toString();
+    });
+
+    ffprobe.on("close", (code) => {
+      if (code !== 0) {
+        reject(new Error(`FFprobe failed: ${stderr}`));
+        return;
+      }
+
+      try {
+        const result = JSON.parse(stdout);
+        const stream = result.streams[0];
+        resolve({ width: stream.width, height: stream.height });
+      } catch (e) {
+        reject(new Error(`Failed to parse FFprobe output: ${e}`));
+      }
+    });
+  });
+}
+
+/**
+ * Get video dimensions from a URL using FFprobe (no download required)
+ */
+async function getVideoDimensionsFromUrl(
+  videoUrl: string
+): Promise<{ width: number; height: number }> {
+  return new Promise((resolve, reject) => {
+    const ffprobe = spawn("ffprobe", [
+      "-v",
+      "error",
+      "-select_streams",
+      "v:0",
+      "-show_entries",
+      "stream=width,height",
+      "-of",
+      "json",
+      videoUrl, // FFprobe can read directly from URLs
     ]);
 
     let stdout = "";
@@ -522,3 +576,259 @@ export async function watermarkVideoToAzure(
     ]);
   }
 }
+
+/**
+ * Watermark a video by streaming directly from Azure Blob → FFmpeg → Azure Blob
+ * Most memory efficient - never buffers the entire video in memory
+ *
+ * @param inputBlobUrl - The SAS URL or public URL of the input video blob
+ * @param watermark - The watermark text
+ * @param containerName - Azure blob container name for output
+ * @param blobName - The blob name (path) for the output
+ * @returns The blob URL for the uploaded video
+ */
+export async function watermarkVideoStreamToAzure(
+  inputBlobUrl: string,
+  watermark: string,
+  containerName: string,
+  blobName: string
+): Promise<string> {
+  log(`Starting video stream watermark: Azure → FFmpeg → Azure`);
+  log(`Input URL: ${inputBlobUrl.substring(0, 50)}...`);
+
+  const connectionString = envParseString("AZURE_STORAGE_CONNECTION_STRING");
+  const blobServiceClient =
+    BlobServiceClient.fromConnectionString(connectionString);
+  const containerClient = blobServiceClient.getContainerClient(containerName);
+  const blockBlobClient = containerClient.getBlockBlobClient(blobName);
+
+  // Create temp directory for overlay only (no video files stored)
+  const tempDir = await mkdtemp(join(tmpdir(), "watermark-"));
+  const overlayPath = join(tempDir, "overlay.png");
+
+  try {
+    // Get video dimensions directly from URL (no download)
+    log("Probing video dimensions from URL...");
+    const { width, height } = await getVideoDimensionsFromUrl(inputBlobUrl);
+    log(`Video dimensions: ${width}x${height}`);
+
+    // Generate watermark overlay (single frame, transparent PNG)
+    log("Generating watermark overlay...");
+    const overlayStart = Date.now();
+    const overlayBuffer = createWatermarkBuffer(width, height, watermark);
+    await writeFile(overlayPath, overlayBuffer);
+    log(
+      `Watermark overlay created in ${Date.now() - overlayStart}ms (${(
+        overlayBuffer.length / 1024
+      ).toFixed(2)} KB)`
+    );
+
+    // Use FFmpeg to stream from URL, overlay watermark, and output to stdout
+    log("Starting FFmpeg stream: URL → overlay → Azure...");
+    const ffmpegStart = Date.now();
+
+    await new Promise<void>((resolve, reject) => {
+      let ffmpegExitCode: number | null = null;
+      let ffmpegDone = false;
+      let uploadDone = false;
+      let uploadError: Error | null = null;
+      let stderr = "";
+
+      const checkCompletion = () => {
+        if (ffmpegDone && uploadDone) {
+          if (ffmpegExitCode !== 0) {
+            log(`FFmpeg stderr: ${stderr}`);
+            reject(new Error(`FFmpeg failed with code ${ffmpegExitCode}`));
+          } else if (uploadError) {
+            reject(uploadError);
+          } else {
+            resolve();
+          }
+        }
+      };
+
+      const ffmpeg = spawn("ffmpeg", [
+        "-i",
+        inputBlobUrl, // Input directly from URL (Azure streams to FFmpeg)
+        "-i",
+        overlayPath, // Watermark overlay (local file)
+        "-filter_complex",
+        "[0:v][1:v]overlay=0:0:format=auto",
+        "-c:v",
+        "libx264",
+        "-preset",
+        "fast",
+        "-crf",
+        "23",
+        "-c:a",
+        "copy",
+        "-movflags",
+        "frag_keyframe+empty_moov+default_base_moof",
+        "-f",
+        "mp4",
+        "pipe:1", // Output to stdout (Azure streams from FFmpeg)
+      ]);
+
+      ffmpeg.stderr.on("data", (data) => {
+        stderr += data.toString();
+      });
+
+      // Stream FFmpeg stdout directly to Azure
+      blockBlobClient
+        .uploadStream(ffmpeg.stdout, 4 * 1024 * 1024, 4, {
+          blobHTTPHeaders: {
+            blobContentType: "video/mp4",
+          },
+        })
+        .then(() => {
+          log(`Upload to Azure completed`);
+          uploadDone = true;
+          checkCompletion();
+        })
+        .catch((err) => {
+          uploadError = new Error(`Azure upload failed: ${err.message}`);
+          uploadDone = true;
+          ffmpeg.kill();
+          checkCompletion();
+        });
+
+      ffmpeg.on("close", (code) => {
+        ffmpegExitCode = code;
+        ffmpegDone = true;
+        checkCompletion();
+      });
+
+      ffmpeg.on("error", (err) => {
+        reject(new Error(`FFmpeg spawn error: ${err.message}`));
+      });
+    });
+
+    log(`FFmpeg stream completed in ${Date.now() - ffmpegStart}ms`);
+    log(`Video uploaded to: ${blockBlobClient.url}`);
+
+    return blockBlobClient.url;
+  } finally {
+    // Cleanup temp files (only overlay)
+    log("Cleaning up temp files...");
+    await Promise.allSettled([
+      unlink(overlayPath),
+      import("fs/promises").then((fs) => fs.rmdir(tempDir)),
+    ]);
+  }
+}
+
+// ============================================================
+// BullMQ Worker Implementation
+// ============================================================
+
+const connectionString = envParseString("AZURE_STORAGE_CONNECTION_STRING");
+const blobService = BlobServiceClient.fromConnectionString(connectionString);
+
+async function downloadBlobToBuffer(blobClient: BlobClient): Promise<Buffer> {
+  const download = await blobClient.download();
+
+  const chunks: Buffer[] = [];
+  for await (const chunk of download.readableStreamBody!) {
+    chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+  }
+
+  return Buffer.concat(chunks);
+}
+
+async function processJob(job: Job<JobData>): Promise<void> {
+  const startTime = Date.now();
+  const {
+    container,
+    jobId,
+    type,
+    responseUrl,
+    watermarkText,
+    interaction,
+    filename,
+  } = job.data;
+
+  log(`[JOB:${jobId}] Starting ${type} processing...`);
+  await job.updateProgress(10);
+
+  const containerClient = blobService.getContainerClient(container);
+
+  if (type === "image") {
+    // For images: download → process → upload
+    log(`[JOB:${jobId}] Downloading image blob from container: ${container}`);
+    const inBlob = containerClient.getBlobClient(jobId);
+    const inBuf = await downloadBlobToBuffer(inBlob);
+    log(`[JOB:${jobId}] Downloaded ${(inBuf.length / 1024).toFixed(2)} KB`);
+    await job.updateProgress(25);
+
+    // Process image
+    log(`[JOB:${jobId}] Applying watermark to image...`);
+    const processedBuffer = await watermarkImage(inBuf, watermarkText);
+    await job.updateProgress(50);
+
+    // Upload processed image back to Azure
+    log(`[JOB:${jobId}] Uploading processed image to Azure...`);
+    const outBlob = containerClient.getBlockBlobClient(jobId);
+    await outBlob.uploadData(processedBuffer);
+    await job.updateProgress(75);
+  } else if (type === "video") {
+    // For videos: stream directly Azure → FFmpeg → Azure (no memory buffering)
+    log(`[JOB:${jobId}] Streaming video: Azure → FFmpeg → Azure...`);
+
+    // Generate a SAS URL for FFmpeg to read from
+    const inBlob = containerClient.getBlobClient(jobId);
+    const sasUrl = await inBlob.generateSasUrl({
+      permissions: { read: true } as any,
+      expiresOn: new Date(Date.now() + 60 * 60 * 1000), // 1 hour expiry
+    });
+
+    // Delete existing blob before streaming new one
+    await job.updateProgress(20);
+
+    // Stream directly: Azure blob URL → FFmpeg → Azure blob
+    await watermarkVideoStreamToAzure(sasUrl, watermarkText, container, jobId);
+    await job.updateProgress(75);
+  } else {
+    throw new Error(`Unknown job type: ${type}`);
+  }
+
+  // Send callback to response URL
+  log(`[JOB:${jobId}] Sending callback to response URL...`);
+  const callbackResponse = await fetch(responseUrl, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      jobId,
+      interaction,
+      filename,
+    }),
+  });
+
+  if (!callbackResponse.ok) {
+    throw new Error(`Callback failed with status ${callbackResponse.status}`);
+  }
+
+  await job.updateProgress(100);
+
+  const totalTime = Date.now() - startTime;
+  log(`[JOB:${jobId}] Job completed successfully in ${totalTime}ms`);
+}
+
+// Create and start the worker
+const worker = new Worker<JobData>("watermark", processJob, {
+  connection: redisConnection,
+  concurrency: 1,
+});
+
+worker.on("completed", (job) => {
+  log(`[WORKER] Job ${job.id} completed successfully`);
+});
+
+worker.on("failed", (job, err) => {
+  log(`[WORKER] Job ${job?.id} failed: ${err.message}`);
+});
+
+worker.on("error", (err) => {
+  log(`[WORKER] Worker error: ${err.message}`);
+});
+
+log("[WORKER] Watermark worker started and listening for jobs...");
