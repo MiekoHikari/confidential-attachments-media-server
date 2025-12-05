@@ -98,8 +98,6 @@ app.post("/new-item", zValidator("json", newJobSchema), async (c) => {
     console.log(`[REQUEST:${requestId}] Applying watermark to image...`);
     processedBuffer = await watermarkImage(inBuf, watermarkText);
 
-    c.json({ status: "accepted" });
-
     const processTime = Date.now() - processStart;
     console.log(`[REQUEST:${requestId}] Image watermarking complete`);
 
@@ -115,7 +113,8 @@ app.post("/new-item", zValidator("json", newJobSchema), async (c) => {
       `[REQUEST:${requestId}] Applying watermark to video and streaming to Azure...`
     );
 
-    c.json({ status: "accepted" });
+    const blobClient = containerClient.getBlobClient(jobId);
+    await blobClient.deleteIfExists();
 
     // Stream watermarked video directly to Azure (more memory efficient)
     const blobUrl = await watermarkVideoToAzure(
@@ -154,6 +153,8 @@ app.post("/new-item", zValidator("json", newJobSchema), async (c) => {
     console.log(
       `[REQUEST:${requestId}] ----------------------------------------`
     );
+
+    return c.json({ status: "accepted" });
   }
 
   if (!processedBuffer) {

@@ -432,6 +432,26 @@ export async function watermarkVideoToAzure(
     const ffmpegStart = Date.now();
 
     await new Promise<void>((resolve, reject) => {
+      let ffmpegExitCode: number | null = null;
+      let ffmpegDone = false;
+      let uploadDone = false;
+      let uploadError: Error | null = null;
+      let stderr = "";
+
+      const checkCompletion = () => {
+        // Only resolve/reject when BOTH FFmpeg has exited AND upload is complete
+        if (ffmpegDone && uploadDone) {
+          if (ffmpegExitCode !== 0) {
+            log(`FFmpeg stderr: ${stderr}`);
+            reject(new Error(`FFmpeg failed with code ${ffmpegExitCode}`));
+          } else if (uploadError) {
+            reject(uploadError);
+          } else {
+            resolve();
+          }
+        }
+      };
+
       const ffmpeg = spawn("ffmpeg", [
         "-i",
         inputPath, // Input video
@@ -448,13 +468,11 @@ export async function watermarkVideoToAzure(
         "-c:a",
         "copy", // Copy audio without re-encoding
         "-movflags",
-        "frag_keyframe+empty_moov", // Enable streaming output (fragmented MP4)
+        "frag_keyframe+empty_moov+default_base_moof", // Enable streaming output (fragmented MP4) with proper base offsets
         "-f",
         "mp4", // Output format
         "pipe:1", // Output to stdout
       ]);
-
-      let stderr = "";
 
       ffmpeg.stderr.on("data", (data) => {
         stderr += data.toString();
@@ -469,19 +487,20 @@ export async function watermarkVideoToAzure(
         })
         .then(() => {
           log(`Upload to Azure completed`);
+          uploadDone = true;
+          checkCompletion();
         })
         .catch((err) => {
+          uploadError = new Error(`Azure upload failed: ${err.message}`);
+          uploadDone = true;
           ffmpeg.kill();
-          reject(new Error(`Azure upload failed: ${err.message}`));
+          checkCompletion();
         });
 
       ffmpeg.on("close", (code) => {
-        if (code !== 0) {
-          log(`FFmpeg stderr: ${stderr}`);
-          reject(new Error(`FFmpeg failed with code ${code}`));
-          return;
-        }
-        resolve();
+        ffmpegExitCode = code;
+        ffmpegDone = true;
+        checkCompletion();
       });
 
       ffmpeg.on("error", (err) => {
