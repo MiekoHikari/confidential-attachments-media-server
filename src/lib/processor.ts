@@ -1,4 +1,8 @@
-import { createCanvas, loadImage } from "canvas";
+import { createCanvas, loadImage } from "@napi-rs/canvas";
+
+function log(message: string) {
+  console.log(`[PROCESSOR] ${new Date().toISOString()} - ${message}`);
+}
 
 function createWatermarkBuffer(
   width: number,
@@ -61,27 +65,56 @@ function createWatermarkBuffer(
     ctx.fillText(line, randomX, drawY);
   });
 
-  return canvas.toBuffer();
+  return canvas.toBuffer("image/png");
 }
 
 export async function watermarkImage(
   buffer: Buffer<ArrayBuffer>,
   watermark: string
 ): Promise<Buffer> {
+  log(
+    `Starting watermark process for buffer of ${(buffer.length / 1024).toFixed(
+      2
+    )} KB`
+  );
+
+  log("Loading source image...");
+  const loadStart = Date.now();
   const image = await loadImage(buffer);
+  log(`Source image loaded in ${Date.now() - loadStart}ms`);
+  log(`Image dimensions: ${image.width}x${image.height}`);
+
+  log("Creating canvas...");
   const canvas = createCanvas(image.width, image.height);
   const ctx = canvas.getContext("2d");
 
+  log("Drawing source image to canvas...");
   ctx.drawImage(image, 0, 0);
 
+  log("Generating watermark overlay...");
+  const watermarkStart = Date.now();
   const watermarkBuffer = createWatermarkBuffer(
     image.width,
     image.height,
     watermark
   );
+  log(
+    `Watermark buffer created in ${Date.now() - watermarkStart}ms (${(
+      watermarkBuffer.length / 1024
+    ).toFixed(2)} KB)`
+  );
 
+  log("Loading watermark as image...");
   const watermarkOverlay = await loadImage(watermarkBuffer);
+  log("Compositing watermark onto image...");
   ctx.drawImage(watermarkOverlay, 0, 0);
 
-  return canvas.toBuffer();
+  log("Encoding final image to PNG buffer...");
+  const encodeStart = Date.now();
+  const outputBuffer = canvas.toBuffer("image/png");
+  log(`Image encoded in ${Date.now() - encodeStart}ms`);
+  log(`Output buffer size: ${(outputBuffer.length / 1024).toFixed(2)} KB`);
+  log("Watermark process complete");
+
+  return outputBuffer;
 }

@@ -1,70 +1,173 @@
+import "./lib/setup.js";
 import { BlobServiceClient } from "@azure/storage-blob";
 import { serve } from "@hono/node-server";
 import { zValidator } from "@hono/zod-validator";
 import { Hono } from "hono";
-import { z } from "zod";
+import { logger } from "hono/logger";
 import { watermarkImage } from "./lib/processor.js";
+import { newJobSchema } from "./lib/types.js";
 
 const app = new Hono();
 
+// Request logging middleware
+app.use("*", logger());
+
+// Custom error logging
+app.onError((err, c) => {
+  console.error(
+    `[ERROR] ${new Date().toISOString()} - ${c.req.method} ${c.req.path}`
+  );
+  console.error(`[ERROR] Message: ${err.message}`);
+  console.error(`[ERROR] Stack:`, err.stack);
+  return c.json({ error: "Internal Server Error", message: err.message }, 500);
+});
+
+console.log(
+  `[INIT] ${new Date().toISOString()} - Initializing Azure Blob Service Client...`
+);
 const blobService = BlobServiceClient.fromConnectionString(
   process.env.AZURE_STORAGE_CONNECTION_STRING!
 );
-const containerClient = blobService.getContainerClient("cams"); // make sure this container exists
-
-const newJobSchema = z.object({
-  container: z.string().min(1),
-  blobName: z.string().min(1),
-  type: z.enum(["image", "video"]),
-  responseUrl: z.url(),
-  watermarkText: z.string().min(1),
-});
+console.log(
+  `[INIT] ${new Date().toISOString()} - Azure Blob Service Client initialized`
+);
 
 app.post("/new-item", zValidator("json", newJobSchema), async (c) => {
-  const { container, blobName, type, responseUrl, watermarkText } =
-    c.req.valid("json");
+  const startTime = Date.now();
+  const requestId = crypto.randomUUID();
+
+  const {
+    container,
+    jobId,
+    type,
+    responseUrl,
+    watermarkText,
+    interaction,
+    filename,
+  } = c.req.valid("json");
+
+  console.log(
+    `[REQUEST:${requestId}] ${new Date().toISOString()} - New job received`
+  );
+  console.log(`[REQUEST:${requestId}] Job ID: ${jobId}`);
+  console.log(`[REQUEST:${requestId}] Container: ${container}`);
+  console.log(`[REQUEST:${requestId}] Type: ${type}`);
+  console.log(`[REQUEST:${requestId}] Filename: ${filename}`);
+  console.log(`[REQUEST:${requestId}] Response URL: ${responseUrl}`);
+  console.log(
+    `[REQUEST:${requestId}] Watermark text length: ${watermarkText.length} chars`
+  );
 
   // Get input blob
+  console.log(`[REQUEST:${requestId}] Fetching blob from container...`);
   const containerClient = blobService.getContainerClient(container);
-  const inBlob = containerClient.getBlobClient(blobName);
-  const download = await inBlob.download();
-  const inBuf = Buffer.from(await (await download.blobBody!).arrayBuffer());
+  const inBlob = containerClient.getBlobClient(jobId);
 
-  let processedBuffer: Buffer<ArrayBufferLike> | null = null; // Placeholder - replace with actual ffmpeg processing
+  console.log(`[REQUEST:${requestId}] Downloading blob: ${jobId}`);
+  const downloadStart = Date.now();
+  const download = await inBlob.download();
+  console.log(
+    `[REQUEST:${requestId}] Blob download initiated, reading stream...`
+  );
+
+  const chunks: Buffer[] = [];
+  for await (const chunk of download.readableStreamBody!) {
+    chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+  }
+  const inBuf = Buffer.concat(chunks);
+  const downloadTime = Date.now() - downloadStart;
+  console.log(`[REQUEST:${requestId}] Blob downloaded successfully`);
+  console.log(
+    `[REQUEST:${requestId}] Download size: ${(inBuf.length / 1024).toFixed(
+      2
+    )} KB`
+  );
+  console.log(`[REQUEST:${requestId}] Download time: ${downloadTime}ms`);
+
+  let processedBuffer: Buffer<ArrayBufferLike> | null = null;
+  console.log(`[REQUEST:${requestId}] Starting ${type} processing...`);
+  const processStart = Date.now();
+
   if (type === "image") {
+    console.log(`[REQUEST:${requestId}] Applying watermark to image...`);
     processedBuffer = await watermarkImage(inBuf, watermarkText);
+    const processTime = Date.now() - processStart;
+    console.log(`[REQUEST:${requestId}] Image watermarking complete`);
+    console.log(
+      `[REQUEST:${requestId}] Output size: ${(
+        processedBuffer.length / 1024
+      ).toFixed(2)} KB`
+    );
+    console.log(`[REQUEST:${requestId}] Processing time: ${processTime}ms`);
   } else if (type === "video") {
+    console.log(
+      `[REQUEST:${requestId}] Video processing not implemented, returning 501`
+    );
     return c.json({ error: "Video processing not implemented" }, 501);
   }
 
   if (!processedBuffer) {
+    console.error(
+      `[REQUEST:${requestId}] Processing failed - no output buffer`
+    );
     return c.json({ error: "Processing failed" }, 500);
   }
 
   // After processing, upload back to Blob
-  const outName = `processed/${blobName}`;
+  console.log(
+    `[REQUEST:${requestId}] Uploading processed file back to blob...`
+  );
+  const uploadStart = Date.now();
+  const outName = `${jobId}`;
   const outBlob = containerClient.getBlockBlobClient(outName);
   await outBlob.uploadData(processedBuffer);
+  const uploadTime = Date.now() - uploadStart;
+  console.log(`[REQUEST:${requestId}] Upload complete`);
+  console.log(`[REQUEST:${requestId}] Upload time: ${uploadTime}ms`);
 
-  // Notify Discord via responseUrl
-  await fetch(responseUrl, {
+  console.log(`[REQUEST:${requestId}] Sending callback to response URL...`);
+  const callbackStart = Date.now();
+  const callbackResponse = await fetch(responseUrl, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
-      content: "✅ Job complete!",
-      embeds: [{ image: { url: outBlob.url } }],
+      jobId,
+      interaction,
+      filename,
     }),
   });
+  const callbackTime = Date.now() - callbackStart;
+  console.log(
+    `[REQUEST:${requestId}] Callback response status: ${callbackResponse.status}`
+  );
+  console.log(`[REQUEST:${requestId}] Callback time: ${callbackTime}ms`);
+
+  const totalTime = Date.now() - startTime;
+  console.log(`[REQUEST:${requestId}] Job completed successfully`);
+  console.log(`[REQUEST:${requestId}] Total processing time: ${totalTime}ms`);
+  console.log(
+    `[REQUEST:${requestId}] ----------------------------------------`
+  );
 
   return c.json({ status: "accepted" });
 });
 
+const port = Number(process.env.PORT) || 3000;
+
+console.log(`[INIT] ${new Date().toISOString()} - Starting server...`);
 serve(
   {
     fetch: app.fetch,
-    port: 3000,
+    port,
   },
   (info) => {
-    console.log(`Server is running on http://localhost:${info.port}`);
+    console.log(
+      `[INIT] ${new Date().toISOString()} - Server is running on http://localhost:${
+        info.port
+      }`
+    );
+    console.log(`[INIT] Environment: ${process.env.NODE_ENV}`);
+    console.log(`[INIT] Ready to accept requests`);
+    console.log(`[INIT] ========================================`);
   }
 );

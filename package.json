@@ -10,7 +10,8 @@
     "@azure/storage-blob": "^12.29.1",
     "@hono/node-server": "^1.19.6",
     "@hono/zod-validator": "^0.7.5",
-    "canvas": "^3.2.0",
+    "@napi-rs/canvas": "^0.1.83",
+    "@skyra/env-utilities": "^2.0.1",
     "hono": "^4.10.7",
     "zod": "^4.1.13"
   },
