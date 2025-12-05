@@ -7,8 +7,12 @@
     "start": "node dist/index.js"
   },
   "dependencies": {
+    "@azure/storage-blob": "^12.29.1",
     "@hono/node-server": "^1.19.6",
-    "hono": "^4.10.7"
+    "@hono/zod-validator": "^0.7.5",
+    "canvas": "^3.2.0",
+    "hono": "^4.10.7",
+    "zod": "^4.1.13"
   },
   "devDependencies": {
     "@types/node": "^20.11.17",
