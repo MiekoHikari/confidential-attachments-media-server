@@ -1,5 +1,5 @@
 import "./lib/setup.js";
-import { BlobServiceClient } from "@azure/storage-blob";
+import { BlobClient, BlobServiceClient } from "@azure/storage-blob";
 import { serve } from "@hono/node-server";
 import { zValidator } from "@hono/zod-validator";
 import { Hono } from "hono";
@@ -32,6 +32,17 @@ console.log(
   `[INIT] ${new Date().toISOString()} - Azure Blob Service Client initialized`
 );
 
+async function downloadBlobToBuffer(blobClient: BlobClient): Promise<Buffer> {
+  const download = await blobClient.download();
+
+  const chunks: Buffer[] = [];
+  for await (const chunk of download.readableStreamBody!) {
+    chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+  }
+
+  return Buffer.concat(chunks);
+}
+
 app.post("/new-item", zValidator("json", newJobSchema), async (c) => {
   const startTime = Date.now();
   const requestId = crypto.randomUUID();
@@ -58,23 +69,18 @@ app.post("/new-item", zValidator("json", newJobSchema), async (c) => {
     `[REQUEST:${requestId}] Watermark text length: ${watermarkText.length} chars`
   );
 
-  // Get input blob
   console.log(`[REQUEST:${requestId}] Fetching blob from container...`);
   const containerClient = blobService.getContainerClient(container);
   const inBlob = containerClient.getBlobClient(jobId);
 
   console.log(`[REQUEST:${requestId}] Downloading blob: ${jobId}`);
   const downloadStart = Date.now();
-  const download = await inBlob.download();
   console.log(
     `[REQUEST:${requestId}] Blob download initiated, reading stream...`
   );
 
-  const chunks: Buffer[] = [];
-  for await (const chunk of download.readableStreamBody!) {
-    chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
-  }
-  const inBuf = Buffer.concat(chunks);
+  const inBuf = await downloadBlobToBuffer(inBlob);
+
   const downloadTime = Date.now() - downloadStart;
   console.log(`[REQUEST:${requestId}] Blob downloaded successfully`);
   console.log(
@@ -91,18 +97,25 @@ app.post("/new-item", zValidator("json", newJobSchema), async (c) => {
   if (type === "image") {
     console.log(`[REQUEST:${requestId}] Applying watermark to image...`);
     processedBuffer = await watermarkImage(inBuf, watermarkText);
+
+    c.json({ status: "accepted" });
+
     const processTime = Date.now() - processStart;
     console.log(`[REQUEST:${requestId}] Image watermarking complete`);
+
     console.log(
       `[REQUEST:${requestId}] Output size: ${(
         processedBuffer.length / 1024
       ).toFixed(2)} KB`
     );
+
     console.log(`[REQUEST:${requestId}] Processing time: ${processTime}ms`);
   } else if (type === "video") {
     console.log(
       `[REQUEST:${requestId}] Applying watermark to video and streaming to Azure...`
     );
+
+    c.json({ status: "accepted" });
 
     // Stream watermarked video directly to Azure (more memory efficient)
     const blobUrl = await watermarkVideoToAzure(
@@ -141,8 +154,6 @@ app.post("/new-item", zValidator("json", newJobSchema), async (c) => {
     console.log(
       `[REQUEST:${requestId}] ----------------------------------------`
     );
-
-    return c.json({ status: "accepted" });
   }
 
   if (!processedBuffer) {
@@ -156,6 +167,7 @@ app.post("/new-item", zValidator("json", newJobSchema), async (c) => {
   console.log(
     `[REQUEST:${requestId}] Uploading processed file back to blob...`
   );
+
   const uploadStart = Date.now();
   const outName = `${jobId}`;
   const outBlob = containerClient.getBlockBlobClient(outName);
@@ -166,6 +178,7 @@ app.post("/new-item", zValidator("json", newJobSchema), async (c) => {
 
   console.log(`[REQUEST:${requestId}] Sending callback to response URL...`);
   const callbackStart = Date.now();
+
   const callbackResponse = await fetch(responseUrl, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -175,6 +188,7 @@ app.post("/new-item", zValidator("json", newJobSchema), async (c) => {
       filename,
     }),
   });
+
   const callbackTime = Date.now() - callbackStart;
   console.log(
     `[REQUEST:${requestId}] Callback response status: ${callbackResponse.status}`
@@ -188,7 +202,7 @@ app.post("/new-item", zValidator("json", newJobSchema), async (c) => {
     `[REQUEST:${requestId}] ----------------------------------------`
   );
 
-  return c.json({ status: "accepted" });
+  return;
 });
 
 const port = Number(process.env.PORT) || 3000;

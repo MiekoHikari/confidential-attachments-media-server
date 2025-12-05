@@ -161,7 +161,7 @@ function createWatermarkBuffer(
 }
 
 export async function watermarkImage(
-  buffer: Buffer<ArrayBuffer>,
+  buffer: Buffer<ArrayBufferLike>,
   watermark: string
 ): Promise<Buffer> {
   log(
@@ -382,7 +382,7 @@ export async function watermarkVideo(
  * @returns The blob URL for the uploaded video
  */
 export async function watermarkVideoToAzure(
-  inputBuffer: Buffer<ArrayBuffer>,
+  inputBuffer: Buffer<ArrayBufferLike>,
   watermark: string,
   containerName: string,
   blobName: string
