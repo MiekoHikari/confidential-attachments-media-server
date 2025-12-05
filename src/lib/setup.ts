@@ -16,5 +16,8 @@ setup({ path: join(srcDir, ".env") });
 declare module "@skyra/env-utilities" {
   interface Env {
     AZURE_STORAGE_CONNECTION_STRING: string;
+
+    // REDIS
+    REDIS_URL: string;
   }
 }
