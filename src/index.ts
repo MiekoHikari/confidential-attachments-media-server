@@ -1,8 +1,12 @@
 import "./lib/setup.js";
 import { serve } from "@hono/node-server";
+import { serveStatic } from "@hono/node-server/serve-static";
 import { zValidator } from "@hono/zod-validator";
 import { Hono } from "hono";
 import { logger } from "hono/logger";
+import { createBullBoard } from "@bull-board/api";
+import { BullMQAdapter } from "@bull-board/api/bullMQAdapter";
+import { HonoAdapter } from "@bull-board/hono";
 import { watermarkQueue } from "./lib/mq.js";
 import { newJobSchema } from "./lib/types.js";
 import "./lib/processor.js"; // Import to start the worker
@@ -11,6 +15,17 @@ const app = new Hono();
 
 // Request logging middleware
 app.use("*", logger());
+
+// Bull Board Dashboard UI
+const serverAdapter = new HonoAdapter(serveStatic);
+serverAdapter.setBasePath("/admin/queues");
+
+createBullBoard({
+  queues: [new BullMQAdapter(watermarkQueue)],
+  serverAdapter,
+});
+
+app.route("/admin/queues", serverAdapter.registerPlugin());
 
 // Custom error logging
 app.onError((err, c) => {
@@ -44,6 +59,18 @@ app.post("/new-item", zValidator("json", newJobSchema), async (c) => {
   );
 
   return c.json({ status: "accepted", jobId: jobData.jobId }, 202);
+});
+
+// Metrics endpoint for KEDA scaling
+app.get("/metrics", async (c) => {
+  const waitingCount = await watermarkQueue.getWaitingCount();
+  const activeCount = await watermarkQueue.getActiveCount();
+
+  return c.json({
+    waiting: waitingCount,
+    active: activeCount,
+    total: waitingCount + activeCount,
+  });
 });
 
 const port = Number(process.env.PORT) || 3000;

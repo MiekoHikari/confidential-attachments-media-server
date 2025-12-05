@@ -3,7 +3,11 @@ import { spawn } from "child_process";
 import { writeFile, unlink, mkdtemp } from "fs/promises";
 import { tmpdir } from "os";
 import { join } from "path";
-import { BlobServiceClient, BlobClient } from "@azure/storage-blob";
+import {
+  BlobServiceClient,
+  BlobClient,
+  BlobSASPermissions,
+} from "@azure/storage-blob";
 import { envParseString } from "@skyra/env-utilities";
 import { Worker, Job } from "bullmq";
 import { redisConnection } from "./mq.js";
@@ -777,7 +781,7 @@ async function processJob(job: Job<JobData>): Promise<void> {
     // Generate a SAS URL for FFmpeg to read from
     const inBlob = containerClient.getBlobClient(jobId);
     const sasUrl = await inBlob.generateSasUrl({
-      permissions: { read: true } as any,
+      permissions: BlobSASPermissions.parse("r"),
       expiresOn: new Date(Date.now() + 60 * 60 * 1000), // 1 hour expiry
     });
 
@@ -816,15 +820,28 @@ async function processJob(job: Job<JobData>): Promise<void> {
 // Create and start the worker
 const worker = new Worker<JobData>("watermark", processJob, {
   connection: redisConnection,
-  concurrency: 1,
+  concurrency: 1, // FFmpeg is CPU-bound
+  lockDuration: 60000, // 60s (match your longest video)
+  lockRenewTime: 30000, // Renew every 30s
+  stalledInterval: 30000, // Check stalls less often
+  maxStalledCount: 1, // Fail after 1 stall
+  removeOnComplete: { count: 100 }, // Clean immediately
+  removeOnFail: { count: 3 },
 });
 
 worker.on("completed", (job) => {
-  log(`[WORKER] Job ${job.id} completed successfully`);
+  log(
+    `[WORKER] Job ${job.id} completed successfully | Attempts: ${job.attemptsMade}`
+  );
 });
 
 worker.on("failed", (job, err) => {
-  log(`[WORKER] Job ${job?.id} failed: ${err.message}`);
+  log(
+    `[WORKER] Job ${job?.id} failed | Attempts: ${job?.attemptsMade}/${job?.opts.attempts} | Reason: ${err.message}`
+  );
+  if (job?.failedReason) {
+    log(`[WORKER] Failed reason: ${job.failedReason}`);
+  }
 });
 
 worker.on("error", (err) => {
