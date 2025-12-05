@@ -4,7 +4,7 @@ import { serve } from "@hono/node-server";
 import { zValidator } from "@hono/zod-validator";
 import { Hono } from "hono";
 import { logger } from "hono/logger";
-import { watermarkImage } from "./lib/processor.js";
+import { watermarkImage, watermarkVideoToAzure } from "./lib/processor.js";
 import { newJobSchema } from "./lib/types.js";
 
 const app = new Hono();
@@ -101,9 +101,48 @@ app.post("/new-item", zValidator("json", newJobSchema), async (c) => {
     console.log(`[REQUEST:${requestId}] Processing time: ${processTime}ms`);
   } else if (type === "video") {
     console.log(
-      `[REQUEST:${requestId}] Video processing not implemented, returning 501`
+      `[REQUEST:${requestId}] Applying watermark to video and streaming to Azure...`
     );
-    return c.json({ error: "Video processing not implemented" }, 501);
+
+    // Stream watermarked video directly to Azure (more memory efficient)
+    const blobUrl = await watermarkVideoToAzure(
+      inBuf,
+      watermarkText,
+      container,
+      jobId
+    );
+
+    const processTime = Date.now() - processStart;
+    console.log(`[REQUEST:${requestId}] Video watermarking + upload complete`);
+    console.log(`[REQUEST:${requestId}] Blob URL: ${blobUrl}`);
+    console.log(`[REQUEST:${requestId}] Processing time: ${processTime}ms`);
+
+    // Send callback directly since video is already uploaded
+    console.log(`[REQUEST:${requestId}] Sending callback to response URL...`);
+    const callbackStart = Date.now();
+    const callbackResponse = await fetch(responseUrl, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        jobId,
+        interaction,
+        filename,
+      }),
+    });
+    const callbackTime = Date.now() - callbackStart;
+    console.log(
+      `[REQUEST:${requestId}] Callback response status: ${callbackResponse.status}`
+    );
+    console.log(`[REQUEST:${requestId}] Callback time: ${callbackTime}ms`);
+
+    const totalTime = Date.now() - startTime;
+    console.log(`[REQUEST:${requestId}] Job completed successfully`);
+    console.log(`[REQUEST:${requestId}] Total processing time: ${totalTime}ms`);
+    console.log(
+      `[REQUEST:${requestId}] ----------------------------------------`
+    );
+
+    return c.json({ status: "accepted" });
   }
 
   if (!processedBuffer) {
