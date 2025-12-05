@@ -67,8 +67,6 @@ app.get("/metrics", async (c) => {
   const activeCount = await watermarkQueue.getActiveCount();
 
   return c.json({
-    waiting: waitingCount,
-    active: activeCount,
     total: waitingCount + activeCount,
   });
 });
