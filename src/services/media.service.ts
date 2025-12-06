@@ -106,6 +106,10 @@ export class MediaService {
             code === 0 ? resolve() : reject(new Error(`FFmpeg exited ${code}`))
           );
           ffmpeg.on("error", reject);
+
+          ffmpeg.stderr.on("data", (data) => {
+            log("FFMPEG", `Stderr: ${data}`);
+          });
         }),
       ]);
     } finally {
