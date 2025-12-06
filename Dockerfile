@@ -1,6 +1,13 @@
 # Build stage
 FROM node:20-alpine AS builder
 
+# Install build dependencies for @napi-rs/canvas
+RUN apk add --no-cache \
+    python3 \
+    make \
+    g++ \
+    libc6-compat
+
 # Install pnpm
 RUN corepack enable && corepack prepare pnpm@latest --activate
 
@@ -22,8 +29,15 @@ RUN pnpm build
 # Production stage
 FROM node:20-alpine AS production
 
-# Install ffmpeg (includes ffprobe)
-RUN apk add --no-cache ffmpeg
+# Install runtime dependencies for @napi-rs/canvas and ffmpeg
+RUN apk add --no-cache \
+    ffmpeg \
+    libc6-compat \
+    fontconfig \
+    freetype \
+    ttf-dejavu \
+    ttf-liberation \
+    font-noto
 
 # Install pnpm
 RUN corepack enable && corepack prepare pnpm@latest --activate
