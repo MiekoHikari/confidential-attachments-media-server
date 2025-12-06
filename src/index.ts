@@ -66,9 +66,7 @@ app.get("/metrics", async (c) => {
   const waitingCount = await watermarkQueue.getWaitingCount();
   const activeCount = await watermarkQueue.getActiveCount();
 
-  return c.json({
-    total: waitingCount + activeCount,
-  });
+  return c.text(`${waitingCount + activeCount}`, 200);
 });
 
 const port = Number(process.env.PORT) || 3000;
