@@ -25,12 +25,17 @@ export class StorageService {
   async uploadBuffer(
     container: string,
     blobName: string,
-    buffer: Buffer
+    buffer: Buffer,
+    contentType?: string
   ): Promise<void> {
     const client = this.blobService
       .getContainerClient(container)
       .getBlockBlobClient(blobName);
-    await client.uploadData(buffer);
+    await client.uploadData(buffer, {
+      blobHTTPHeaders: contentType
+        ? { blobContentType: contentType }
+        : undefined,
+    });
   }
 
   async generateSasUrl(container: string, blobName: string): Promise<string> {

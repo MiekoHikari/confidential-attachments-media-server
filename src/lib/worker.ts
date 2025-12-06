@@ -37,7 +37,12 @@ async function processJob(job: Job<JobData>): Promise<void> {
     await job.updateProgress(60);
 
     // 3. Upload
-    await storageService.uploadBuffer(container, jobId, outputBuffer);
+    await storageService.uploadBuffer(
+      container,
+      jobId,
+      outputBuffer,
+      "image/png"
+    );
     await job.updateProgress(90);
   } else if (type === "video") {
     // 1. Prepare Access
