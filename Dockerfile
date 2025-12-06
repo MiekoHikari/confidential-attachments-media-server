@@ -22,6 +22,9 @@ RUN pnpm build
 # Production stage
 FROM node:20-alpine AS production
 
+# Install ffmpeg (includes ffprobe)
+RUN apk add --no-cache ffmpeg
+
 # Install pnpm
 RUN corepack enable && corepack prepare pnpm@latest --activate
 

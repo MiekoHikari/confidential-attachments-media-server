@@ -72,11 +72,18 @@ async function processJob(job: Job<JobData>): Promise<void> {
   }
 
   // 4. Callback
-  await fetch(responseUrl, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ jobId, interaction, filename }),
-  });
+  log("WORKER", `[JOB:${jobId}] Sending callback to: ${responseUrl}`);
+  try {
+    const response = await fetch(responseUrl, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ jobId, interaction, filename }),
+    });
+    log("WORKER", `[JOB:${jobId}] Callback response: ${response.status}`);
+  } catch (err) {
+    log("WORKER", `[JOB:${jobId}] Callback failed: ${err}`);
+    throw err;
+  }
 
   log("WORKER", `[JOB:${jobId}] Completed in ${Date.now() - start}ms`);
 }
@@ -88,11 +95,11 @@ const worker = new Worker<JobData>("watermark", processJob, {
   lockDuration: 60000,
   lockRenewTime: 30000,
   removeOnComplete: { count: 100 },
-  removeOnFail: { count: 3 },
+  removeOnFail: { count: 3 }, // Immediately remove failed jobs from queue
 });
 
 worker.on("completed", (job) => log("WORKER", `Job ${job.id} done`));
-worker.on("failed", (job, err) =>
-  log("WORKER", `Job ${job?.id} failed: ${err.message}`)
-);
+worker.on("failed", async (job, err) => {
+  log("WORKER", `Job ${job?.id} failed: ${err.message}`);
+});
 worker.on("error", (err) => log("WORKER", `System error: ${err.message}`));

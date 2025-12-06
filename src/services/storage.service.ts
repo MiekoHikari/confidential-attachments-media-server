@@ -56,6 +56,17 @@ export class StorageService {
       .getContainerClient(container)
       .getBlockBlobClient(blobName);
   }
+
+  /**
+   * Deletes a blob from storage
+   */
+  async deleteBlob(container: string, blobName: string): Promise<void> {
+    const client = this.blobService
+      .getContainerClient(container)
+      .getBlobClient(blobName);
+    await client.deleteIfExists();
+    log("STORAGE", `Deleted blob: ${container}/${blobName}`);
+  }
 }
 
 export const storageService = new StorageService();
