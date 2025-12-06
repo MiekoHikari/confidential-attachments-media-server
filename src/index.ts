@@ -9,7 +9,7 @@ import { BullMQAdapter } from "@bull-board/api/bullMQAdapter";
 import { HonoAdapter } from "@bull-board/hono";
 import { watermarkQueue } from "./lib/mq.js";
 import { newJobSchema } from "./lib/types.js";
-import "./lib/processor.js"; // Import to start the worker
+import "./lib/worker.js"; // Import to start the worker
 
 const app = new Hono();
 
